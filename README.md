@@ -60,7 +60,7 @@ I've seen all of these in the wild and personally have used all but the first in
 I propose we should create a new `try` expression. This would simplify a lot of common error handling tasks, and it'd synergize very well with the [pattern matching proposal](https://github.com/tc39/proposal-pattern-matching). It would operate basically like this:
 
 ```js
-const {caught, value} = try expr
+const result = try expr
 ```
 
 This would desugar roughly to the following:
@@ -70,10 +70,10 @@ let $result // This variable is purely internal
 try {
   $result = {caught: false, value: expr}
 } catch (e) {
-  $result = {caught: true, value: e}
+  $result = {caught: true, error: e}
 }
 
-const {caught, value} = $result
+const result = $result
 ```
 
 This is compatible with both `yield` and `await`, and such expressions can be anywhere. No restrictions are placed on the operand aside from it must be a valid unary expression and it can't start with a literal `{` (to prevent ambiguity). For example:
@@ -89,10 +89,10 @@ let $result // This variable is purely internal
 try {
   $result = {caught: false, value: await save(await transformData())}
 } catch (e) {
-  $result = {caught: true, value: e}
+  $result = {caught: true, result: e}
 }
 
-const {caught, value} = $result
+const addResult = $result
 ```
 
 ### Spec
@@ -109,14 +109,13 @@ The semantics are also similarly simple:
 `` UnaryExpression :: `try` UnaryExpression ``
 
 1. Let *E* be the result of evaluating *UnaryExpression*.
-2. Let *caught* be **`false`**.
-3. If *E*.[[Type]] is **normal**, let *caught* be **`false`**.
-4. Else, if *E*.[[Type]] is **throw**, let *caught* be **`true`**.
-5. Else, return Completion(*E*).
-6. Let *result* be ObjectCreate(%ObjectPrototype%).
-7. Perform ! CreateDataProperty(*result*, **`"caught"`**, *caught*).
-8. Perform ! CreateDataProperty(*result*, **`"value"`**, *E*.[[Value]]).
-9. Return NormalCompletion(*result*).
+2. If *E*.[[Type]] is **normal**, let *caught* be **`false`** and *valueKey* be **`"value"`**.
+3. Else, if *E*.[[Type]] is **throw**, let *caught* be **`true`** and *valueKey* be **`"error"`**.
+4. Else, return Completion(*E*).
+5. Let *result* be ObjectCreate(%ObjectPrototype%).
+6. Perform ! CreateDataProperty(*result*, **`"caught"`**, *caught*).
+7. Perform ! CreateDataProperty(*result*, *valueKey*, *E*.[[Value]]).
+8. Return NormalCompletion(*result*).
 
 ## Examples
 
@@ -133,11 +132,11 @@ async function asyncTask() {
   const user = userReq.value
 
   const taskReq = try await TaskModel({userId: user.id, name: 'Demo Task'})
-  if (taskReq.caught) throw new CustomError('Error occurred while saving task')
+  if (taskReq.caught) throw new CustomError('Error occurred while saving task', taskReq.error)
 
   if (user.notificationsEnabled) {
     const notificationReq = try await NotificationService.sendNotification(user.id, 'Task Created')
-    if (notificationReq.caught) console.error('Just log the error and continue flow')
+    if (notificationReq.caught) console.error('Error occurred while sending notification', notificationReq.error)
   }
 }
 ```
@@ -192,7 +191,7 @@ class Context {
     if (tryBody.caught) {
       if (count < test.attempts) return this.invokeInit(count + 1)
       test.locked = true
-      return Promise.resolve(new Result(syncEnd - start, true, tryBody.value))
+      return Promise.resolve(new Result(syncEnd - start, true, tryBody.error))
     }
 
     const tryThen = try getThen(tryBody.value)
@@ -200,7 +199,7 @@ class Context {
     if (tryThen.caught) {
       if (count < test.attempts) return this.invokeInit(count + 1)
       test.locked = true
-      return Promise.resolve(new Result(syncEnd - start, true, tryThen.value))
+      return Promise.resolve(new Result(syncEnd - start, true, tryThen.error))
     }
 
     if (typeof tryThen.value !== "function") {
@@ -224,7 +223,7 @@ class Context {
 
       if (state == null) return
       if (result.caught) {
-          state.finish(true, result.value)
+          state.finish(true, result.error)
           state = undefined
           return
       }
@@ -335,15 +334,13 @@ The [introduction](#introduction) covers it pretty well. But there's a few desig
 Two reasons:
 
 1. It's easier to manage as a first-class citizen if you need to. Not all use cases boil down to in the small, and the names get invaluable if you use them anywhere else.
-2. For the common case of `const {caught, value} = try expr` and friends, implementations can (and should) detect that at parse time and generate bytecode that works more like `let caught = false, value; try { value = expr } catch (e) { caught = true; value = e }` to avoid the intermediate object.
-
-If you really need names to differentiate results, you can always just do `const userRequest = try await getUserSomehow()` or something like that, using names to differentiate. (You don't need to destructure *everything*!) Also, this isn't meant to be a general replacement of `try`/`catch`, but to augment it for use cases ill-suited for that statement.
+2. It's not ambiguous which field corresponds to what. Some might associate the first item as the value, some the second, and an object allows both ways while an array doesn't.
 
 ### Why not just an error + data pair?
 
-Because it's lossy and `{error: null, value: null}` could be reasonably parsed as either an error or success depending on which value you check. It's possible `undefined` could be thrown, and if you use `!= null` to track the presence/absence of an exception, it will lead you into problems.
+Because it's lossy and `{error: undefined, value: undefined}` could be reasonably parsed as either an error or success depending on which value you check first. It's possible `undefined` could be thrown, and if you use `!= null` to track the presence/absence of an exception, it will lead you into problems. (In simpler cases, this won't come up, but it does come up frequently in advanced cases.)
 
-I've already experienced this a few times in Node.js code, and I'd like to avoid replicating that design mistake.
+Note that the differing objects do mean you *could* still do `const {caught, error, value} = try ...`. You can have informative names; you just have to check a third variable each time.
 
 ### Why an operator and not a function?
 
